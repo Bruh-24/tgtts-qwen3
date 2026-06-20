@@ -1,3 +1,4 @@
+import asyncio
 import io
 import json
 import logging
@@ -5,10 +6,17 @@ import os
 import time
 from typing import *
 
+import numpy as np
+import soundfile as sf
 import torch
-from flask import jsonify
-from pydub import AudioSegment
-from pydub.silence import detect_leading_silence
+from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi.responses import JSONResponse
+from huggingface_hub import snapshot_download
+from nanovllm_voxcpm import VoxCPM
+from nanovllm_voxcpm.models.voxcpm2.config import LoRAConfig
+from nanovllm_voxcpm.models.voxcpm2.server import AsyncVoxCPM2ServerPool
+from pydub import AudioSegment, effects
+from tqdm.asyncio import tqdm
 
 # Configure logging
 logging.basicConfig(
@@ -16,258 +24,129 @@ logging.basicConfig(
 )
 logger = logging.getLogger("tts.service")
 
-from torchaudio._extension.utils import _init_dll_path
-
-_init_dll_path()  # I LOVE PYTORCH I LOVE PYTORCH I LOVE PYTORCH FUCKING TORCHAUDIO SUCKS ASS
-import asyncio
-import io
-import json
-import os
-import random
-import re
-import threading
-import time
-
-import librosa
-import numpy as np
-import soundfile as sf
-import torch
-import torchaudio
-from faster_qwen3_tts import FasterQwen3TTS
-from flask import Flask, request, send_file
-from pydub import AudioSegment, effects
-from tqdm import tqdm
+speaker_latents_dir = "./speaker_latents"
 
 
-class Qwen3_TTS_TG(FasterQwen3TTS):
+def load_voice_mapping(mapping_path: str) -> dict[str, dict[str, str]]:
+    with open(mapping_path, "r", encoding="utf-8") as file:
+        raw = json.load(file)
 
-    @classmethod
-    def from_pretrained(
-        cls,
-        model_name: str,
-        device: str = "cuda",
-        dtype: Union[str, torch.dtype] = torch.bfloat16,
-        attn_implementation: str = "sdpa",
-        max_seq_len: int = 2048,
-    ):
-        if isinstance(dtype, str):
-            dtype = getattr(torch, dtype)
+    if not isinstance(raw, dict):
+        return {}
 
-        if not device.startswith("cuda") or not torch.cuda.is_available():
-            raise ValueError("CUDA graphs require CUDA device")
+    result: dict[str, dict[str, str]] = {}
+    for voice_name, entry in raw.items():
+        if isinstance(entry, str):
+            result[voice_name] = {"latent": entry}
+        elif isinstance(entry, dict) and isinstance(entry.get("latent"), str):
+            result[voice_name] = entry
+    return result
 
-        from faster_qwen3_tts.utils import suppress_flash_attn_warning
 
-        # Import here to avoid dependency issues (and suppress flash-attn warning)
-        with suppress_flash_attn_warning():
-            from qwen_tts import Qwen3TTSModel
-        from faster_qwen3_tts.predictor_graph import PredictorGraph
-        from faster_qwen3_tts.talker_graph import TalkerGraph
+def build_voice_list_response(voice_mapping: dict[str, dict[str, str]]) -> list[dict[str, str]]:
+    voices = []
+    for name, entry in voice_mapping.items():
+        voices.append({"name": name, **entry})
+    voices.sort(key=lambda e: e["name"])
+    return voices
 
-        # Load base model using qwen-tts library
-        base_model = Qwen3TTSModel.from_pretrained(
-            model_name,
-            device_map=device,
-            torch_dtype=dtype,
-            attn_implementation=attn_implementation,
-        )
-        talker = base_model.model.talker
-        talker_config = base_model.model.config.talker_config
 
-        # Extract predictor config from loaded model
-        predictor = talker.code_predictor
-        pred_config = predictor.model.config
-        talker_hidden = talker_config.hidden_size
-        predictor_graph = PredictorGraph(
-            predictor,
-            pred_config,
-            talker_hidden,
-            device=device,
-            dtype=dtype,
-            do_sample=True,
-            top_k=50,
-            temperature=0.9,
-        )
-        talker_graph = TalkerGraph(
-            talker.model,
-            talker_config,
-            device=device,
-            dtype=dtype,
-            max_seq_len=max_seq_len,
-        )
-        instance = cls(
-            base_model=base_model,
-            predictor_graph=predictor_graph,
-            talker_graph=talker_graph,
-            device=device,
-            dtype=dtype,
-            max_seq_len=max_seq_len,
-        )
-        instance._compile_codec(True)
-        return instance
+# --- Model Infrastructure ---
 
-    def _compile_codec(self, mode: Union[bool, str] = True) -> None:
-        """Apply ``torch.compile`` to the speech tokenizer codec for faster decoding.
 
-        The codec decoder contains 100+ attention modules that benefit greatly
-        from compilation, as it eliminates per-module Python dispatch overhead.
-        Profiling shows the codec accounts for ~47% of single-generation time
-        and ~85% of batch generation time.  Compilation can improve batch
-        throughput by 3–4x.
-
-        Args:
-                mode:
-                        ``True`` to compile with ``mode="max-autotune"``, or a
-                        ``torch.compile`` mode string (``"max-autotune"``,
-                        ``"reduce-overhead"``, ``"default"``).
-        """
-        compile_mode = "max-autotune" if mode is True else str(mode)
-        codec = self.model.model.speech_tokenizer.model
-        self.model.model.speech_tokenizer.model = torch.compile(
-            codec,
-            mode=compile_mode,
-            dynamic=True,
-        )
-
-    def _prepare_generation_tg(
+class TGAsyncPool(AsyncVoxCPM2ServerPool):
+    async def generate(
         self,
-        text: str,
-        ref_speaker: str,
+        target_text: str,
+        prompt_latents: bytes | None = None,
+        prompt_text: str = "",
+        prompt_id: str | None = None,
+        max_generate_length: int = 2000,
+        temperature: float = 1.0,
+        cfg_value: float = 2.0,
+        ref_audio_latents: bytes | None = None,
     ):
-        """Prepare inputs for generation (shared by streaming and non-streaming).
+        if prompt_id is not None:
+            if prompt_id not in self._prompt_pool:
+                # Note: Keeping the synchronous load here as it's usually fast,
+                # but in high-scale it could be moved to an async executor.
+                latent_path = os.path.join(speaker_latents_dir, f"{prompt_id}.speaker_latent")
+                self._prompt_pool[prompt_id] = torch.load(
+                    latent_path, weights_only=False
+                )
 
-        Args:
-                xvec_only: When True (default), use only the speaker embedding (x-vector) for voice
-                        cloning instead of the full ICL acoustic prompt. This prevents the model from
-                        continuing the reference audio's last phoneme and allows natural language switching.
-                        When False, the full reference audio codec tokens are included in context (ICL mode).
-        """
-        input_texts = [self.model._build_assistant_text(text)]
-        input_ids = self.model._tokenize_texts(input_texts)
-        if not self.latent_cache:
-            self.latent_cache = {}
+            prompt_info = self._prompt_pool[prompt_id]
+            prompt_latents = None
+            prompt_text = ""
+            ref_audio_latents = prompt_info["latents"]
 
-        vcp, ref_ids = self.latent_cache[ref_speaker]
+        min_load_server_idx = np.argmin(self.servers_load)
+        self.servers_load[min_load_server_idx] += 1
+        server = self.servers[min_load_server_idx]
+        try:
+            async for data in server.generate(
+                target_text,
+                prompt_latents,
+                prompt_text,
+                max_generate_length,
+                temperature,
+                cfg_value,
+                ref_audio_latents,
+            ):
+                yield data
+        finally:
+            self.servers_load[min_load_server_idx] -= 1
 
-        m = self.model.model
 
-        tie, tam, tth, tpe = self._build_talker_inputs_local(
-            m=m,
-            input_ids=input_ids,
-            ref_ids=ref_ids,
-            voice_clone_prompt=vcp,
-            languages=["English"],
-            speakers=None,
-            non_streaming_mode=True,
-        )
-
-        if not self._warmed_up:
-            self._warmup(tie.shape[1])
-
-        talker = m.talker
-        config = m.config.talker_config
-        talker.rope_deltas = None
-
-        ref_codes = vcp["ref_code"][0]
-
-        return m, talker, config, tie, tam, tth, tpe, ref_codes
-
-    @torch.inference_mode()
-    def generate_voice_clone_tg(
-        self,
-        text: str,
-        ref_speaker: str,
-        max_new_tokens: int = 256,
-        min_new_tokens: int = 2,
-        temperature: float = 0.9,
-        top_k: int = 50,
-        top_p: float = 1.0,
-        do_sample: bool = True,
-        repetition_penalty: float = 1.05,
-    ) -> Tuple[list, int]:
-        from faster_qwen3_tts.generate import fast_generate
-
-        m, talker, config, tie, tam, tth, tpe, ref_codes = self._prepare_generation_tg(
-            text,
-            ref_speaker,
-        )
-        codec_ids, _ = fast_generate(
-            talker=talker,
-            talker_input_embeds=tie,
-            attention_mask=tam,
-            trailing_text_hiddens=tth,
-            tts_pad_embed=tpe,
-            config=config,
-            predictor_graph=self.predictor_graph,
-            talker_graph=self.talker_graph,
-            max_new_tokens=max_new_tokens,
-            min_new_tokens=min_new_tokens,
-            temperature=temperature,
-            top_k=top_k,
-            top_p=top_p,
-            do_sample=do_sample,
-            repetition_penalty=repetition_penalty,
-        )
-        if codec_ids is None:
-            # print("Generation returned no tokens")
-            return [np.zeros(1, dtype=np.float32)], self.sample_rate
-
-        # In ICL mode: prepend reference codes before decoding so the codec decoder
-        # has acoustic context from the reference audio (matches official implementation).
-        speech_tokenizer = m.speech_tokenizer
-        if ref_codes is not None:
-            ref_codes_dev = ref_codes.to(codec_ids.device)
-            codes_for_decode = torch.cat([ref_codes_dev, codec_ids], dim=0)
+class VoxCPM2_tg_Async:
+    @staticmethod
+    async def from_pretrained(
+        model: str,
+        inference_timesteps: int = 6,
+        max_num_batched_tokens: int = 16384,
+        max_num_seqs: int = 512,
+        max_model_len: int = 4096,
+        gpu_memory_utilization: float = 0.9,
+        enforce_eager: bool = False,
+        devices: List[int] = [],
+        lora_config: Any = None,
+        **kwargs,
+    ):
+        if "~" in model:
+            model_path = os.path.expanduser(model)
         else:
-            codes_for_decode = codec_ids
-        audio_list, sr = speech_tokenizer.decode(
-            {"audio_codes": codes_for_decode.unsqueeze(0)}
+            model_path = (
+                model if os.path.isdir(model) else snapshot_download(repo_id=model)
+            )
+
+        if len(devices) == 0:
+            devices = [0]
+
+        pool = TGAsyncPool(
+            model_path=model_path,
+            inference_timesteps=inference_timesteps,
+            max_num_batched_tokens=max_num_batched_tokens,
+            max_num_seqs=max_num_seqs,
+            max_model_len=max_model_len,
+            gpu_memory_utilization=gpu_memory_utilization,
+            enforce_eager=enforce_eager,
+            devices=devices,
+            lora_config=lora_config,
+            **kwargs,
         )
-
-        # Convert to numpy and trim off the reference audio portion
-        ref_len = ref_codes.shape[0] if ref_codes is not None else 0
-        total_len = codes_for_decode.shape[0]
-        audio_arrays = []
-        for a in audio_list:
-            if hasattr(a, "cpu"):  # torch tensor
-                a = a.flatten().cpu().numpy()
-            else:  # already numpy
-                a = a.flatten() if hasattr(a, "flatten") else a
-            if ref_len > 0:
-                cut = int(ref_len / max(total_len, 1) * len(a))
-                a = a[cut:]
-            audio_arrays.append(a)
-        return audio_arrays, sr
+        await pool.wait_for_ready()
+        return pool
 
 
-import io
+# --- App Setup ---
 
-print("I: Loading Qwen3-TTS and LavaSR into memory...")
-model = Qwen3_TTS_TG.from_pretrained("Qwen/Qwen3-TTS-12Hz-1.7B-Base")
-from LavaSR.model import LavaEnhance2
-
-lava_model = LavaEnhance2("YatharthS/LavaSR", "cuda")
-tts_lock = threading.Lock()
-print("Done loading.")
+app = FastAPI()
+model = None  # Global model instance
 voice_name_mapping = {}
-use_voice_name_mapping = True
-with open("./voice_mapping.json", "r") as file:
-    voice_name_mapping = json.load(file)
-    print("loaded voice mappings")
-    if len(voice_name_mapping) == 0:
-        use_voice_name_mapping = False
-print("voice mappings to use: " + ", ".join(list(voice_name_mapping.values())))
-app = Flask(__name__)
-letters_to_use = "ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890"
-random_factor = 0.35
-os.makedirs("samples", exist_ok=True)
-trim_leading_silence = lambda x: x[detect_leading_silence(x) :]
-trim_trailing_silence = lambda x: trim_leading_silence(x.reverse()).reverse()
-strip_silence = lambda x: trim_trailing_silence(trim_leading_silence(x))
-
-global request_count
+use_voice_name_mapping = False
 
 
+# Audio Utility Functions
 def normalize_to_target(seg, target_dbfs=-20.0):
     change = target_dbfs - seg.dBFS
     return seg.apply_gain(change)
@@ -275,166 +154,138 @@ def normalize_to_target(seg, target_dbfs=-20.0):
 
 def cap_loudness(seg, max_dbfs=-1.0):
     if seg.max_dBFS > max_dbfs:
-        change = max_dbfs - seg.max_dBFS
-        return seg.apply_gain(change)
+        return seg.apply_gain(max_dbfs - seg.max_dBFS)
     return seg
 
 
-@app.route("/generate-tts")
-def text_to_speech():
-    text = request.json.get("text", "")
-    voice = request.json.get("voice", "")
+@app.on_event("startup")
+async def startup_event():
+    global model, voice_name_mapping, use_voice_name_mapping
+
+    # Load voice mappings
+    voice_name_mapping = load_voice_mapping("./voice_mapping.json")
+    use_voice_name_mapping = len(voice_name_mapping) > 0
+    if use_voice_name_mapping:
+        logger.info("Loaded %d voice mappings", len(voice_name_mapping))
+
+    logger.info("Loading VoxCPM2 into memory...")
+    model = await VoxCPM2_tg_Async.from_pretrained(
+        "openbmb/VoxCPM2",
+        devices=[0],
+        max_num_batched_tokens=8192,
+        max_num_seqs=16,
+        gpu_memory_utilization=0.85,
+    )
+    logger.info("Model Loaded.")
+
+
+# --- API Endpoints ---
+
+
+@app.get("/generate-tts")  # Support both for compatibility
+async def text_to_speech(request: Request):
+    # Parse json body
+    body = await request.json()
+
+    text = body.get("text", "")
+    voice = body.get("voice", "")
     request_start_time = time.time()
     logger.debug(f"Endpoint: /generate-tts | Voice: {voice} | Text: {text[:50]}...")
-    result = None
-    actual_text_found = False
-    audio_duration = 0
-    tts_duration = 0
-    lava_duration = 0
-    normalize_duration = 0
-    with tts_lock:
-        with io.BytesIO() as data_bytes:
-            for i, letter in enumerate(text):
-                if letter in letters_to_use:
-                    actual_text_found = True
-                    break
-            if not actual_text_found:
-                logger.debug(
-                    "No alphanumeric characters found in text, returning stub file."
-                )
-                stub_file = AudioSegment.empty()
-                stub_file.set_frame_rate(48000)
-                stub_file.export(data_bytes, format="wav")
-                result = send_file(
-                    io.BytesIO(data_bytes.getvalue()), mimetype="audio/wav"
-                )
-                return result
-            with torch.inference_mode():
-                final_letter = text[-1]
-                acceptable_punctuation = [".", "?", "!"]
-                if not final_letter in acceptable_punctuation:
-                    text += ". "
-                if (
-                    text and text[0].isalpha() and not text[0].isupper()
-                ):  # capitalize that shit if they forgot
-                    text = text[0].upper() + text[1:]
 
-                # Inference
-                gen_start = time.time()
-                audio_list, sr = model.generate_voice_clone_tg(
-                    text=text, ref_speaker=voice
-                )
-                gen_end = time.time()
+    # Check for actual content
+    if not any(character.isalnum() for character in text):
+        stub = AudioSegment.empty().set_frame_rate(48000)
+        buffer = io.BytesIO()
+        stub.export(buffer, format="wav")
+        return Response(content=buffer.getvalue(), media_type="audio/wav")
 
-                tts_duration = gen_end - gen_start
+    # Sanitize text
+    if text and text[-1] not in [".", "?", "!"]:
+        text += ". "
+    if text and text[0].isalpha() and not text[0].isupper():
+        text = text[0].upper() + text[1:]
 
-                sf.write(data_bytes, audio_list[0], sr, format="wav")
+    # Inference (No Lock needed - Nano-vLLM handles it)
+    gen_start = time.time()
+    voice_entry = voice_name_mapping.get(voice)
+    max_generate_length = 256
+    chunks = []
+    async for chunk in model.generate(
+        target_text=text,
+        prompt_id=voice_entry["latent"] if voice_entry else None,
+        max_generate_length=max_generate_length,
+    ):
+        chunks.append(chunk)
 
-                enhance_start = time.time()
-                input_audio, _ = lava_model.load_audio(
-                    io.BytesIO(data_bytes.getvalue()), input_sr=24000
-                )
-                output_audio = (
-                    lava_model.enhance(input_audio, denoise=False)
-                    .cpu()
-                    .numpy()
-                    .squeeze()
-                )
-                enhance_end = time.time()
-                lava_duration = enhance_end - enhance_start
+    wav_data = np.concatenate(chunks, axis=0)
+    tts_duration = time.time() - gen_start
 
-                normalise_start = time.time()
-                temp_databytes = io.BytesIO()
-                sf.write(temp_databytes, output_audio, 48000, format="wav")
-                rawsound = AudioSegment.from_file(
-                    io.BytesIO(temp_databytes.getvalue()), "wav"
-                )
-                normalizedsound = normalize_to_target(rawsound, -25)
-                normalizedsound = cap_loudness(normalizedsound, max_dbfs=-5)
-                normalizedsound = effects.normalize(rawsound)
-                normalizedsound.export(temp_databytes, format="wav")
-                normalised_end = time.time()
-                normalize_duration = normalised_end - normalise_start
-                result = send_file(
-                    io.BytesIO(temp_databytes.getvalue()), mimetype="audio/wav"
-                )
-                audio_duration = len(normalizedsound) / 1000
+    tts_databytes = io.BytesIO()
+    sf.write(tts_databytes, wav_data, 48000, format="wav")
+    gen_end = time.time()
+    tts_duration = gen_end - gen_start
+    normalise_start = time.time()
+    rawsound = AudioSegment.from_file(io.BytesIO(tts_databytes.getvalue()), "wav")
+    temp_databytes = io.BytesIO()
+    normalizedsound = normalize_to_target(rawsound, -25)
+    normalizedsound = cap_loudness(normalizedsound, max_dbfs=-5)
+    normalizedsound = effects.normalize(rawsound)
+    normalizedsound.export(temp_databytes, format="wav")
+    normalised_end = time.time()
+    normalize_duration = normalised_end - normalise_start
+    audio_duration = len(normalizedsound) / 1000
+    total_time = time.time() - request_start_time
+    logmsg = f"Slow request detected. Total time: {total_time:.4f}s | Voice: {voice} | Text: {text} | Audio Duration: {audio_duration:.2f}s | TTS Time: {tts_duration:.4f}s | Normalization Time: {normalize_duration:.4f}s"
+    if total_time > 4.0:
+        logger.warning(logmsg)
 
-        totaltime = time.time() - request_start_time
-        if totaltime > 4.0:
-            logger.warning(
-                f"Slow request detected. Total time: {totaltime:.4f}s | Voice: {voice} | Text: {text} | Audio Duration: {audio_duration:.2f}s | TTS Time: {tts_duration:.4f}s | LavaSR Time: {lava_duration:.4f}s | Normalization Time: {normalize_duration:.4f}s"
-            )
-
-        else:
-            logger.info(
-                f"Request complete Total time: {totaltime:.4f}s | Voice: {voice} | Text: {text} | Audio Duration: {audio_duration:.2f}s | TTS Time: {tts_duration:.4f}s | LavaSR Time: {lava_duration:.4f}s | Normalization Time: {normalize_duration:.4f}s"
-            )
+    else:
+        logger.info(logmsg)
+    
+       # torch.cuda.empty_cache()
+    return Response(content=temp_databytes.getvalue(), media_type="audio/wav")
 
 
-@app.route("/tts-voices")
-def voices_list():
+@app.get("/tts-voices")
+async def voices_list():
     if use_voice_name_mapping:
-        data = list(voice_name_mapping.keys())
-        data.sort()
-        return jsonify(data)
+        return JSONResponse(content=build_voice_list_response(voice_name_mapping))
+    return JSONResponse(content=[])
 
 
-@app.route("/health-check")
-def tts_health_check():
-    return f"OK: 1", 200
+@app.get("/health-check")
+async def tts_health_check():
+    return Response(content="OK: 1", status_code=200)
 
 
-@app.route("/toggle-logging")
-def toggle_logging():
-    level_str = request.args.get("level", "").upper()
-    if level_str:
+@app.get("/toggle-logging")
+async def toggle_logging(level: str = None):
+    if level:
         try:
-            logger.setLevel(level_str)
+            logger.setLevel(level.upper())
         except (ValueError, TypeError):
-            return (
-                jsonify(
-                    {
-                        "status": "error",
-                        "message": f"Invalid logging level: {level_str}",
-                    }
-                ),
-                400,
+            return JSONResponse(
+                status_code=400,
+                content={"status": "error", "message": f"Invalid level: {level}"},
             )
     else:
-        current_level = logger.getEffectiveLevel()
-        new_level = logging.DEBUG if current_level == logging.INFO else logging.INFO
+        new_level = (
+            logging.DEBUG
+            if logger.getEffectiveLevel() == logging.INFO
+            else logging.INFO
+        )
         logger.setLevel(new_level)
 
-    level_name = logging.getLevelName(logger.getEffectiveLevel())
-    return jsonify({"status": "success", "new_level": level_name})
+    return JSONResponse(
+        {
+            "status": "success",
+            "new_level": logging.getLevelName(logger.getEffectiveLevel()),
+        }
+    )
 
 
 if __name__ == "__main__":
-    from waitress import serve
+    import uvicorn
 
-    print("Beginning voice caching")
-    model.latent_cache = {}
-    for k, v in tqdm(voice_name_mapping.items()):
-        model.latent_cache[k] = torch.load("./speaker_latents/" + v + ".speaker_latent")
-    print("Cached voices.")
-    print("Warming model up...")
-    with tts_lock:
-        trash = io.BytesIO()
-        audio_list, sr = model.generate_voice_clone_tg(
-            text="The quick brown fox jumps over the lazy dog.",
-            ref_speaker=list(voice_name_mapping)[0],
-        )
-        sf.write(trash, audio_list[0], sr, format="wav")
-        input_audio, _ = lava_model.load_audio(
-            io.BytesIO(trash.getvalue()), input_sr=24000
-        )
-        output_audio = (
-            lava_model.enhance(input_audio, denoise=False).cpu().numpy().squeeze()
-        )
-        del trash
-        del input_audio
-        del output_audio
-        del _
-    print("Serving TTS on :5003")
-    serve(app, host="0.0.0.0", port=5003, backlog=32, channel_timeout=8)
+    # Use uvicorn instead of Waitress
+    uvicorn.run(app, host="0.0.0.0", port=5003, log_level="info")

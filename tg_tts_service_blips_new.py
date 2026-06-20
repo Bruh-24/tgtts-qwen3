@@ -2,6 +2,8 @@ import io
 import json
 import logging
 import os
+import random
+import re
 import time
 from typing import *
 
@@ -14,6 +16,32 @@ logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger("tts.blips")
+
+
+# voice_mapping.json uses "latent": "category":
+# so json.load() alone would return dict[str, dict]
+def load_voice_mapping(mapping_path: str) -> dict[str, dict[str, str]]:
+    with open(mapping_path, "r", encoding="utf-8") as file:
+        raw = json.load(file)
+
+    if not isinstance(raw, dict):
+        return {}
+
+    result: dict[str, dict[str, str]] = {}
+    for voice_name, entry in raw.items():
+        if isinstance(entry, str):
+            result[voice_name] = {"latent": entry}
+        elif isinstance(entry, dict) and isinstance(entry.get("latent"), str):
+            result[voice_name] = entry
+    return result
+
+
+def build_voice_list_response() -> list[dict[str, str]]:
+    voices = []
+    for name, entry in voice_name_mapping.items():
+        voices.append({"name": name, **entry})
+    voices.sort(key=lambda e: e["name"])
+    return voices
 
 from torchaudio._extension.utils import _init_dll_path
 
@@ -36,13 +64,45 @@ from flask import Flask, request, send_file
 from pydub import AudioSegment, effects
 from tqdm import tqdm
 
-voice_name_mapping = {}
+cyrillic_to_latin = {
+    'А': 'A', 'Б': 'B', 'В': 'V', 'Г': 'G', 'Д': 'D', 'Е': 'E',
+    'Ё': 'E', 'Ж': 'Z', 'З': 'Z', 'И': 'I', 'Й': 'I', 'К': 'K',
+    'Л': 'L', 'М': 'M', 'Н': 'N', 'О': 'O', 'П': 'P', 'Р': 'R',
+    'С': 'S', 'Т': 'T', 'У': 'U', 'Ф': 'F', 'Х': 'H', 'Ц': 'T',
+    'Ч': 'C', 'Ш': 'S', 'Щ': 'S', 'Ъ': '', 'Ы': 'Y', 'Ь': '',
+    'Э': 'E', 'Ю': 'I', 'Я': 'A',
+}
+cyrillic_regex = re.compile(r'[а-яёА-ЯЁ]')
+
+
+def has_cyrillic(text):
+    return bool(cyrillic_regex.search(text))
+
+
+def transliterate(text):
+    result = []
+    for c in text:
+        upper = c.upper()
+        if c in cyrillic_to_latin:
+            result.append(cyrillic_to_latin[c])
+        elif upper in cyrillic_to_latin:
+            transliterated = cyrillic_to_latin[upper]
+            if c.islower() and transliterated:
+                result.append(transliterated[0].lower())
+                result.append(transliterated[1:])
+            else:
+                result.append(transliterated)
+        else:
+            result.append(c)
+    return ''.join(result)
+
+
+voice_name_mapping: dict[str, dict[str, str]] = {}
 sfx_sound_mapping = {}
 use_voice_name_mapping = True
-with open("./voice_mapping.json", "r") as file:
-    voice_name_mapping = json.load(file)
-    if len(voice_name_mapping) == 0:
-        use_voice_name_mapping = False
+voice_name_mapping = load_voice_mapping("./voice_mapping.json")
+if len(voice_name_mapping) == 0:
+    use_voice_name_mapping = False
 with open("./sfx_mapping.json", "r") as file:
     sfx_sound_mapping = json.load(file)
 
@@ -104,6 +164,11 @@ def cap_loudness(seg, max_dbfs=-1.0):
 def text_to_speech_blips():
     global blips_cache
     text = request.json.get("text", "")
+    # cyrillic
+    if has_cyrillic(text):
+        transliterated = transliterate(text)
+        text = transliterated
+    #
     voice = request.json.get("voice", "")
     blip_base = request.json.get("blip_base", "")
     blip_number = request.json.get("blip_number", "")
@@ -116,7 +181,7 @@ def text_to_speech_blips():
         pitch = "0"
     # print(voice + " blips, " + "\"" + text + "\"")
     if use_voice_name_mapping:
-        voice = voice_name_mapping[voice]
+        voice = voice_name_mapping[voice]["latent"]
     result = None
     actual_text_found = False
     skip_these = " ,:;'\""
@@ -305,9 +370,8 @@ def text_to_speech_blips():
 @app.route("/tts-voices")
 def voices_list():
     if use_voice_name_mapping:
-        data = list(voice_name_mapping.keys())
-        data.sort()
-        return json.dumps(data)
+        return json.dumps(build_voice_list_response())
+    return json.dumps([])
 
 
 @app.route("/health-check")
@@ -344,7 +408,8 @@ if __name__ == "__main__":
     from waitress import serve
 
     print("Beginning voice caching")
-    for voice, latent in tqdm(voice_name_mapping.items()):
+    for voice, voice_entry in tqdm(voice_name_mapping.items()):
+        latent = voice_entry["latent"]
         if not os.path.exists("./speaker_latents/" + latent + ".blips"):
             print("No " + latent + " path found in blips for " + voice)
             continue

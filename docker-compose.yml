@@ -7,6 +7,8 @@ services:
       - tts1
       - api1
       - blips
+      - radio
+      - radio-gibberish
     ports:
       - 5002:5002
       - 8888:8888
@@ -16,12 +18,15 @@ services:
     networks:
       - default
     volumes:
+      - ./tts-api.py:/workspace/tts-api.py:rw
       - ./cache:/workspace/cache:rw
+      - ./effects:/workspace/effects:rw
     environment:
       # only enable this if you're having gpu errors you need to debug.
       #- TORCH_USE_CUDA_DSA=1
       - TORCH_CUDNN_SDPA_ENABLED=1
       - TORCH_LOG=perf_hints
+      - TTS_AUTHORIZATION_TOKEN=${TTS_AUTHORIZATION_TOKEN}
     deploy:
       resources:
         reservations:
@@ -35,13 +40,15 @@ services:
     networks:
       - default
     volumes:
+      - ./tg_tts_service.py:/workspace/tg_tts_service.py:rw
       - ./speaker_latents:/workspace/speaker_latents:rw
       - ./voice_mapping.json:/workspace/voice_mapping.json:rw
       - ./huggingfacecache:/root/.cache/huggingface:rw
     environment:
       - TORCH_USE_CUDA_DSA=1
       - TORCH_CUDNN_SDPA_ENABLED=1
-      - TORCH_LOG=perf_hints
+      - TORCH_LOG=perf_hint s
+      - TTS_AUTHORIZATION_TOKEN=${TTS_AUTHORIZATION_TOKEN}
     deploy:
       resources:
         reservations:
@@ -55,9 +62,12 @@ services:
     networks:
       - default
     volumes:
+      - ./tg_tts_service_blips_new.py:/workspace/tg_tts_service_blips_new.py:rw
       - ./speaker_latents:/workspace/speaker_latents:rw
       - ./voice_mapping.json:/workspace/voice_mapping.json:rw
       - ./sfx_mapping.json:/workspace/sfx_mapping.json:rw
+      - ./blips_sfx:/workspace/blips_sfx:rw
+      - ./huggingfacecache:/root/.cache/huggingface:rw
     environment:
       - TORCH_USE_CUDA_DSA=1
       - TORCH_CUDNN_SDPA_ENABLED=1
@@ -76,6 +86,31 @@ services:
       - default
     volumes:
       - ./cache:/workspace/cache:rw
+      - ./tg_tts_service_radio.py:/workspace/tg_tts_service_radio.py:rw
+      - ./huggingfacecache:/root/.cache/huggingface:rw
+    environment:
+      # only enable this if you're having gpu errors you need to debug.
+      #- TORCH_USE_CUDA_DSA=1
+      - TORCH_CUDNN_SDPA_ENABLED=1
+      - TORCH_LOG=perf_hints
+      - TTS_AUTHORIZATION_TOKEN=${TTS_AUTHORIZATION_TOKEN}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+  radio-gibberish:
+    build: .
+    command: python -u tg_tts_service_radio_gibberish.py
+    networks:
+      - default
+    volumes:
+      - ./cache:/workspace/cache:rw
+      - ./huggingfacecache:/root/.cache/huggingface:rw
+      - ./cache/torch/hub:/root/.cache/torch/hub:rw
+      - ./tg_tts_service_radio_gibberish.py:/workspace/tg_tts_service_radio_gibberish.py:rw
     environment:
       # only enable this if you're having gpu errors you need to debug.
       #- TORCH_USE_CUDA_DSA=1

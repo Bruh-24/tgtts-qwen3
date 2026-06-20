@@ -1,3 +1,5 @@
+# https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.7.16/flash_attn-2.8.3+cu128torch2.7-cp311-cp311-linux_x86_64.whl
+# FROM pytorch/pytorch:2.7.1-cuda12.8-cudnn9-devel
 # Stage 1: Install system dependencies
 FROM docker.io/pytorch/pytorch:2.7.1-cuda12.6-cudnn9-devel AS system-deps
 

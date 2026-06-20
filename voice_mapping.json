@@ -1,4 +1,178 @@
 {
-	"Example Woman": "hifi_captain_woman",
-	"Example Man": "hifi_captain_man"
+  "celka": {
+    "latent": "celka",
+    "category": "DEPR"
+  },
+  "Arsenkey": {
+    "latent": "arsenkey",
+    "category": "DEPR"
+  },
+  "Voice 2": {
+    "latent": "civ_advisor",
+    "category": "Civilization V"
+  },
+  "Voice 1": {
+    "latent": "civ_storyteller",
+    "category": "Civilization V"
+  },
+  "Man (Tihonov)": {
+    "latent": "lt_tihonov",
+    "category": "Unknown"
+  },
+  "Pudge": {
+    "latent": "meatman2",
+    "category": "Dota 2"
+  },
+  "oguzzzok123": {
+    "latent": "oguzzzok123",
+    "category": "Other"
+  },
+  "Man (Demoman)": {
+    "latent": "tf_demo",
+    "category": "Team Fortress 2"
+  },
+  "Man (Engineer)": {
+    "latent": "tf_engi",
+    "category": "Team Fortress 2"
+  },
+  "Man (Medic)": {
+    "latent": "tf_medic",
+    "category": "Team Fortress 2"
+  },
+  "Man (Scout)": {
+    "latent": "tf_scout",
+    "category": "Team Fortress 2"
+  },
+  "Man (Soldier)": {
+    "latent": "tf_soldier",
+    "category": "Team Fortress 2"
+  },
+  "Man (Spy)": {
+    "latent": "tf_spy",
+    "category": "Team Fortress 2"
+  },
+  "Man (Heavy)": {
+    "latent": "tf_heavy",
+    "category": "Team Fortress 2"
+  },
+  "Man (Sniper)": {
+    "latent": "tf_sniper",
+    "category": "Team Fortress 2"
+  },
+  "Man (TFR)": {
+    "latent": "tfr_soldier",
+    "category": "Other"
+  },
+  "Man (Ponasenkov)": {
+    "latent": "ponasenkov",
+    "category": "Other"
+  },
+  "Man (Dude)": {
+    "latent": "dude",
+    "category": "Postal 2"
+  },
+  "Glados": {
+    "latent": "Vendor_Glados",
+    "category": "Portal 2"
+  },
+  "Military VOX announcer": {
+    "latent": "vox_bm_mil",
+    "category": "Black Mesa"
+  },
+  "Man (Lightkeeper)": {
+    "latent": "lighthouse_keeper",
+    "category": "Lighthouse"
+  },
+  "Man (Lightkeeper Alt)": {
+    "latent": "lighthouse_keeper02",
+    "category": "Lighthouse"
+  },
+  "CABAL": {
+    "latent": "cabal",
+    "category": "Other"
+  },
+  "Man (CI)": {
+    "latent": "CI",
+    "category": "SCP:CB"
+  },
+  "Man (CheeseBurger)": {
+    "latent": "el_lab_cheeseburger",
+    "category": "Other"
+  },
+  "Man (Security Officer)": {
+    "latent": "guard_cb",
+    "category": "SCP:CB"
+  },
+  "Man (Goverment)": {
+    "latent": "hl1_gman",
+    "category": "Half Life"
+  },
+  "Man (Nerd)": {
+    "latent": "hl1_sci",
+    "category": "Half Life"
+  },
+  "Woman (Sophronia)": {
+    "latent": "sophronia",
+    "category": "Other"
+  },
+  "Woman (Windranger)": {
+    "latent": "windranger",
+    "category": "Dota 2"
+  },
+  "Man (Greensky)": {
+    "latent": "zelensky",
+    "category": "Other"
+  },
+  "Woman (Senko)": {
+    "latent": "senko_test",
+    "category": "Other"
+  },
+  "female2": {
+    "latent": "female2",
+    "category": "Female"
+  },
+  "female3": {
+    "latent": "female3",
+    "category": "Female"
+  },
+  "female4": {
+    "latent": "female4",
+    "category": "Female"
+  },
+  "female5": {
+    "latent": "female5",
+    "category": "Female"
+  },
+  "Man (Landa)": {
+    "latent": "landa",
+    "category": "Other"
+  },
+  "Woman (Jane)": {
+    "latent": "Jane",
+    "category": "Other"
+  },
+  "Homelander": {
+    "latent": "homelander",
+    "category": "The Boys"
+  },
+  "Man (Arenator)": {
+    "latent": "arenator",
+    "category": "EFT"
+  },
+  "Man (Bog)": {
+    "latent": "bog",
+    "category": "Other"
+  },
+  "Man (Katz)": {
+    "latent": "katz",
+    "category": "Other"
+  },
+  "Man (Zelensky Angry)": {
+    "latent": "zelensky_angry",
+    "category": "Other"
+  },
+  "Man (Vodila)": {
+    "latent": "vodila",
+    "category": "EFT"
+  }
 }

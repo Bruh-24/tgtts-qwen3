@@ -1,12 +1,21 @@
 import argparse
 import os
 import requests
-import sys
 import json
 
 def get_auth_header():
     token = os.getenv("TTS_AUTHORIZATION_TOKEN", "vote_goof_2024")
     return {"Authorization": token}
+
+def get_voice_display_name(voice):
+    if isinstance(voice, dict):
+        return voice.get("name") or voice.get("voice") or voice.get("latent") or str(voice)
+    return str(voice)
+
+def get_voice_request_value(voice):
+    if isinstance(voice, dict):
+        return voice.get("name") or voice.get("voice") or voice.get("latent") or ""
+    return str(voice)
 
 def toggle_logging(args):
     url = f"http://{args.host}:{args.port}/toggle-logging"
@@ -43,14 +52,20 @@ def generate_audio(args):
     # 2. Ask user for voice
     print("\nAvailable voices:")
     for i, v in enumerate(voices):
-        print(f"{i+1}. {v}")
+        print(f"{i+1}. {get_voice_display_name(v)}")
     
     try:
         choice_input = input(f"\nSelect a voice (1-{len(voices)}): ")
         choice = int(choice_input) - 1
         voice = voices[choice]
+        voice_name = get_voice_display_name(voice)
+        voice_param = get_voice_request_value(voice)
     except (ValueError, IndexError):
         print("Invalid selection.")
+        return
+
+    if not voice_param:
+        print("Selected voice does not contain a usable voice name.")
         return
 
     # 3. Ask for text
@@ -67,14 +82,14 @@ def generate_audio(args):
             filters = f"{filters}|radio" if filters else "radio"
 
     params = {
-        "voice": voice,
+        "voice": voice_param,
         "pitch": args.pitch,
         "special_filters": filters,
         "identifier": identifier
     }
 
     # 5. Call TTS endpoint
-    print(f"Generating base audio for '{voice}' (ID: {identifier})...")
+    print(f"Generating base audio for '{voice_name}' (ID: {identifier})...")
     try:
         response = requests.get(
             f"{base_url}/tts",
@@ -104,6 +119,7 @@ def generate_audio(args):
                 f"{base_url}/tts-radio",
                 headers=get_auth_header(),
                 params=radio_params,
+                json={"raw_text": text, "gibberish_text": ""},
                 stream=True
             )
 

@@ -33,8 +33,8 @@ strip_silence = lambda x: trim_trailing_silence(trim_leading_silence(x))
 tts_sample_rate = 48000
 app = Flask(__name__)
 segmenter = pysbd.Segmenter(language="en", clean=True)
-radio_starts = ["./on1.wav", "./on2.wav"]
-radio_ends = ["./off1.wav", "./off2.wav", "./off3.wav", "./off4.wav"]
+radio_starts = ["./on1.wav", "./on2.wav", "./on3.wav"]
+radio_ends = ["./off1.wav", "./off2.wav", "./off3.wav", "./off4.wav", "./off5.wav"]
 authorization_token = os.getenv("TTS_AUTHORIZATION_TOKEN", "vote_goof_2024")
 cached_messages = []
 max_to_cache = 5
@@ -75,7 +75,7 @@ def bandpass(x, sr, low=300, high=3000, order=4):
 
 
 def compress(x, threshold=0.2, ratio=4):
-    y = x.copy()
+    y = x.copy()prompt_reference.wav в
     mask = np.abs(y) > threshold
     y[mask] = np.sign(y[mask]) * (threshold + (np.abs(y[mask]) - threshold) / ratio)
     return y
@@ -148,6 +148,36 @@ def radio_effect(audio, sr):
     return output
 
 
+announcement_effects = {
+    "centcom", "alert", "captain", "syndicate", "request_console",
+}
+
+
+def apply_announcement_effect(audio, effect, identifier=""):
+    np_audio, sr = audiosegment_to_numpy(audio)
+    if np_audio.ndim > 1:
+        np_audio = np_audio.mean(axis=1)
+
+    np_audio = bandpass(np_audio, sr, low=300, high=3000)
+
+    if effect == "alert":
+        np_audio = normalize(np_audio, 0.95)
+    else:
+        np_audio = normalize(np_audio, 0.80)
+
+    audio = numpy_to_audiosegment(np_audio, sr)
+
+    intro_path = os.path.join("effects", f"{effect}_intro.wav")
+    outro_path = os.path.join("effects", f"{effect}_outro.wav")
+
+    if os.path.exists(intro_path):
+        audio = pydub.AudioSegment.from_file(intro_path, "wav") + audio
+    if os.path.exists(outro_path):
+        audio = audio + pydub.AudioSegment.from_file(outro_path, "wav")
+
+    return audio
+
+
 tts_jobs = {}
 blips_jobs = {}
 
@@ -194,6 +224,7 @@ def text_to_speech_handler(
     special_filters=[],
     segment=False,
     identifier="",
+    announcement_effect="",
 ):
     filter_complex = filter_complex.replace('"', "")
     data_bytes = io.BytesIO()
@@ -555,6 +586,7 @@ def text_to_speech_normal():
     silicon = request.args.get("silicon", "")
     if silicon:
         special_filters = ["silicon"]
+    announcement_effect = request.args.get("announcement_effect", "")
 
     filter_complex = request.args.get("filter", "")
     return text_to_speech_handler(
@@ -568,6 +600,7 @@ def text_to_speech_normal():
         special_filters,
         False,
         identifier,
+        announcement_effect,
     )
 
 
@@ -584,6 +617,7 @@ def text_to_speech_blips():
     if pitch == "":
         pitch = "0"
     special_filters = special_filters.split("|")
+    announcement_effect = request.args.get("announcement_effect", "")
     filter_complex = request.args.get("filter", "")
     blip_base = request.args.get("blip_base", "")
     if blip_base == "":
@@ -602,6 +636,7 @@ def text_to_speech_blips():
         special_filters,
         True,
         identifier,
+        announcement_effect,
     )
 
 
@@ -612,10 +647,13 @@ def text_to_speech_radio():
     identifier = request.args.get("identifier", "")
     raw_text = request.json.get("raw_text", "")
     gibberish_text = request.json.get("gibberish_text", "")
-
+    announcement_effect = request.args.get("announcement_effect", "")
+    request_url = "http://haproxy:5005/radio"
+    if gibberish_text != "":
+        request_url = "http://haproxy:5006/radio-gibberish"
     req_start = time.time()
     response = requests.get(
-        "http://haproxy:5005/radio",
+        request_url,
         json={"identifier": identifier, "folder": "radio", "raw_text": raw_text, "gibberish_text": gibberish_text},
     )
 
@@ -626,6 +664,8 @@ def text_to_speech_radio():
         f"ID: {identifier} | Radio service request time: {time.time() - req_start:.4f}s"
     )
     sentence_audio = pydub.AudioSegment.from_file(io.BytesIO(response.content), "ogg")
+    if announcement_effect:
+        sentence_audio = apply_announcement_effect(sentence_audio, announcement_effect, identifier)
     data_bytes = io.BytesIO()
     sentence_audio.export(data_bytes, format="ogg")
     output = send_file(
@@ -643,6 +683,7 @@ def text_to_speech_blips_radio():
     if authorization_token != request.headers.get("Authorization", ""):
         abort(401)
     identifier = request.args.get("identifier", "")
+    announcement_effect = request.args.get("announcement_effect", "")
 
     req_start = time.time()
     response = requests.get(
@@ -657,6 +698,8 @@ def text_to_speech_blips_radio():
         f"ID: {identifier} | Radio service request time: {time.time() - req_start:.4f}s"
     )
     sentence_audio = pydub.AudioSegment.from_file(io.BytesIO(response.content), "ogg")
+    if announcement_effect:
+        sentence_audio = apply_announcement_effect(sentence_audio, announcement_effect, identifier)
     data_bytes = io.BytesIO()
     sentence_audio.export(data_bytes, format="ogg")
     output = send_file(
