@@ -75,7 +75,7 @@ def bandpass(x, sr, low=300, high=3000, order=4):
 
 
 def compress(x, threshold=0.2, ratio=4):
-    y = x.copy()prompt_reference.wav в
+    y = x.copy()
     mask = np.abs(y) > threshold
     y[mask] = np.sign(y[mask]) * (threshold + (np.abs(y[mask]) - threshold) / ratio)
     return y
