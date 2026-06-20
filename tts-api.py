@@ -293,7 +293,7 @@ def text_to_speech_handler(
                     logger.debug(
                         f"ID: {identifier} | Cache miss: {hashed_message} for sentence segment."
                     )
-                    os.makedirs("./cache/" + hashed_message + "/", exist_ok=true)
+                    os.makedirs("./cache/" + hashed_message + "/", exist_ok=True)
                     req_start = time.time()
                     response = requests.get(
                         endpoint,
@@ -392,7 +392,7 @@ def text_to_speech_handler(
                     )
             else:
                 logger.debug(f"ID: {identifier} | Cache miss: {hashed_message}")
-                os.makedirs("./cache/" + hashed_message + "/", exist_ok=true)
+                os.makedirs("./cache/" + hashed_message + "/", exist_ok=True)
                 req_start = time.time()
                 response = requests.get(
                     endpoint,

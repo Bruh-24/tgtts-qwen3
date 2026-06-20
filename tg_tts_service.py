@@ -106,7 +106,7 @@ class VoxCPM2_tg_Async:
         max_num_batched_tokens: int = 16384,
         max_num_seqs: int = 512,
         max_model_len: int = 4096,
-        gpu_memory_utilization: float = 0.9,
+        gpu_memory_utilization: float = 0.7,
         enforce_eager: bool = False,
         devices: List[int] = [],
         lora_config: Any = None,
@@ -174,7 +174,7 @@ async def startup_event():
         devices=[0],
         max_num_batched_tokens=8192,
         max_num_seqs=16,
-        gpu_memory_utilization=0.85,
+        gpu_memory_utilization=0.7,
     )
     logger.info("Model Loaded.")
 
